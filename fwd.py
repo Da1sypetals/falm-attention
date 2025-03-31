@@ -10,6 +10,8 @@ def _attn_fwd_kernel_inner(
     Q_block,  # (BLOCK_SIZE_Q, HEAD_DIM)
     K_block_ptr,  # pointer to (HEAD_DIM, BLOCK_SIZE_KV)
     V_block_ptr,  # pointer to (BLOCK_SIZE_KV, HEAD_DIM)
+    Mi_block,
+    Mj_block_ptr,
     block_index_q,  # int
     softmax_scale,  # float
     offset_q: tl.constexpr,  # (BLOCK_SIZE_Q,)
@@ -24,6 +26,11 @@ def _attn_fwd_kernel_inner(
     K_block_ptr = tl.advance(
         K_block_ptr, (0, lo)
     )  # K_block is (HEAD_DIM, BLOCK_SIZE_KV)
+
+    Mj_block_ptr = tl.advance(
+        Mj_block_ptr, (0, lo)
+    )  # Mj_block is (MASK_DIM, BLOCK_SIZE_KV)
+
     V_block_ptr = tl.advance(
         V_block_ptr, (lo, 0)
     )  # V_block is (BLOCK_SIZE_KV, HEAD_DIM)
@@ -37,9 +44,17 @@ def _attn_fwd_kernel_inner(
         K_block = tl.load(K_block_ptr)
         QK_block = tl.dot(Q_block, K_block)
 
+        Mj_block = tl.load(Mj_block_ptr)
+        mask_block = tl.dot(Mi_block, Mj_block)
+        mask_block = tl.where(mask_block > 0.0, 0.0, -float("inf"))
+
         QK_block = QK_block * softmax_scale
+
         m_ij = tl.maximum(m_i, tl.max(QK_block, axis=1))
         QK_block = QK_block - m_ij[:, None]
+
+        # TODO: add attention bias according to mask_block
+        QK_block = QK_block + mask_block
 
         # Compute the exponential of each dot product, so now we are computing exp(qk_ij - m_ij)
         P_block = tl.math.exp(QK_block)
@@ -86,6 +101,7 @@ def _attn_fwd_kernel(
     Q,
     K,
     V,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
+    M,
     softmax_scale,  # float
     L,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN
     O,  # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
@@ -105,12 +121,16 @@ def _attn_fwd_kernel(
     stride_O_head,
     stride_O_seq,
     stride_O_dim,  # int
+    stride_M_batch,
+    stride_M_seq,
+    stride_M_maskdim,  # int
     # batch size is not kept constexpr as it is user defined - kernel should not be recompiled for every new batch size
     BATCH_SIZE,
     # these variables are kept as constexpr as these are usually fixed for a model so can be baked into the compilation
     NUM_HEADS: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    MASK_DIM: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
 ):
@@ -135,6 +155,7 @@ def _attn_fwd_kernel(
     # = (index_batch * NUM_HEADS * SEQ_LEN * HEAD_DIM)  + (index_head * SEQ_LEN * HEAD_DIM)
     # = (index_batch * stride_batch) + (index_head * stride_head)
     qkv_offset = index_batch_head.to(tl.int64) * SEQ_LEN * HEAD_DIM
+    mask_offset = index_batch.to(tl.int64) * SEQ_LEN * MASK_DIM
     # qkv_offset = (index_batch.to(tl.int64) * stride_Q_batch + index_head.to(tl.int64) * stride_Q_head)
 
     Q_block_ptr = tl.make_block_ptr(
@@ -146,6 +167,15 @@ def _attn_fwd_kernel(
         order=(1, 0),
     )
 
+    Mi_block_ptr = tl.make_block_ptr(
+        base=M + mask_offset,
+        shape=(SEQ_LEN, MASK_DIM),
+        strides=(stride_M_seq, stride_M_maskdim),
+        offsets=(block_index_q * BLOCK_SIZE_Q, 0),
+        block_shape=(BLOCK_SIZE_Q, MASK_DIM),
+        order=(1, 0),
+    )
+
     K_block_ptr = tl.make_block_ptr(
         base=K + qkv_offset,
         shape=(HEAD_DIM, SEQ_LEN),
@@ -153,6 +183,15 @@ def _attn_fwd_kernel(
         strides=(stride_K_dim, stride_K_seq),
         offsets=(0, 0),
         block_shape=(HEAD_DIM, BLOCK_SIZE_KV),
+        order=(0, 1),
+    )
+
+    Mj_block_ptr = tl.make_block_ptr(
+        base=M + mask_offset,
+        shape=(MASK_DIM, SEQ_LEN),
+        strides=(stride_M_maskdim, stride_M_seq),
+        offsets=(0, 0),
+        block_shape=(MASK_DIM, BLOCK_SIZE_KV),
         order=(0, 1),
     )
 
@@ -189,6 +228,7 @@ def _attn_fwd_kernel(
 
     # load the block of Q (outer loop) => this will stay in SRAM
     Q_block = tl.load(Q_block_ptr)
+    Mi_block = tl.load(Mi_block_ptr)
 
     # stage = 3 if causal else 1
     # this step runs for non-causal attention (for stage = 1) or for
@@ -204,6 +244,8 @@ def _attn_fwd_kernel(
         Q_block,  # (BLOCK_SIZE_Q, HEAD_DIM)
         K_block_ptr,  # pointer to (HEAD_DIM, BLOCK_SIZE_KV)
         V_block_ptr,  # pointer to (BLOCK_SIZE_KV, HEAD_DIM)
+        Mi_block,
+        Mj_block_ptr,
         block_index_q,  # int
         softmax_scale,  # float
         offset_q,  # (BLOCK_SIZE_Q,)

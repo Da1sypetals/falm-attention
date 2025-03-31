@@ -6,10 +6,11 @@ from bwd import _attn_bwd_preprocess_kernel, _attn_bwd_dk_dv_kernel, _attn_bwd_d
 
 class FlashAttentionTriton(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q_bhsd, K_bhsd, V_bhsd, softmax_scale):
+    def forward(ctx, Q_bhsd, K_bhsd, V_bhsd, mf, softmax_scale):
         HEAD_DIM_Q = Q_bhsd.shape[-1]
         HEAD_DIM_K = K_bhsd.shape[-1]
         HEAD_DIM_V = V_bhsd.shape[-1]
+        MASK_DIM = mf.shape[-1]
 
         BATCH_SIZE, NUM_HEADS, SEQ_LEN, _ = Q_bhsd.shape
 
@@ -32,6 +33,7 @@ class FlashAttentionTriton(torch.autograd.Function):
             Q=Q_bhsd,
             K=K_bhsd,
             V=V_bhsd,
+            M=mf,
             softmax_scale=softmax_scale,
             L=L_bhs,
             O=O_bhsd,
@@ -51,13 +53,17 @@ class FlashAttentionTriton(torch.autograd.Function):
             stride_O_head=O_bhsd.stride(1),
             stride_O_seq=O_bhsd.stride(2),
             stride_O_dim=O_bhsd.stride(3),
+            stride_M_batch=mf.stride(0),
+            stride_M_seq=mf.stride(1),
+            stride_M_maskdim=mf.stride(2),
             BATCH_SIZE=Q_bhsd.shape[0],
             NUM_HEADS=Q_bhsd.shape[1],
             SEQ_LEN=Q_bhsd.shape[2],
             HEAD_DIM=HEAD_DIM_K,
+            MASK_DIM=MASK_DIM,
         )
 
-        ctx.save_for_backward(Q_bhsd, K_bhsd, V_bhsd, O_bhsd, L_bhs)
+        ctx.save_for_backward(Q_bhsd, K_bhsd, V_bhsd, O_bhsd, L_bhs, mf)
         ctx.softmax_scale = softmax_scale
         ctx.HEAD_DIM = HEAD_DIM_K
 
