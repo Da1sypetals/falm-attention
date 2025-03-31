@@ -3,9 +3,10 @@ import triton
 from fwd import _attn_fwd_kernel
 from bwd import _attn_bwd_preprocess_kernel, _attn_bwd_dk_dv_kernel, _attn_bwd_dq_kernel
 
+
 class FlashAttentionTriton(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q_bhsd, K_bhsd, V_bhsd, softmax_scale, causal):
+    def forward(ctx, Q_bhsd, K_bhsd, V_bhsd, softmax_scale):
         HEAD_DIM_Q = Q_bhsd.shape[-1]
         HEAD_DIM_K = K_bhsd.shape[-1]
         HEAD_DIM_V = V_bhsd.shape[-1]
@@ -16,12 +17,16 @@ class FlashAttentionTriton(torch.autograd.Function):
 
         O_bhsd = torch.empty_like(Q_bhsd)
 
-        stage = 3 if causal else 1
-
-        grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+        grid = lambda args: (
+            triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]),
+            BATCH_SIZE * NUM_HEADS,
+            1,
+        )
 
         # L is the log-sum-exp for the backward pass
-        L_bhs = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, device=Q_bhsd.device, dtype=torch.float32)
+        L_bhs = torch.empty(
+            BATCH_SIZE, NUM_HEADS, SEQ_LEN, device=Q_bhsd.device, dtype=torch.float32
+        )
 
         _attn_fwd_kernel[grid](
             Q=Q_bhsd,
@@ -50,23 +55,26 @@ class FlashAttentionTriton(torch.autograd.Function):
             NUM_HEADS=Q_bhsd.shape[1],
             SEQ_LEN=Q_bhsd.shape[2],
             HEAD_DIM=HEAD_DIM_K,
-            STAGE=stage,
         )
 
         ctx.save_for_backward(Q_bhsd, K_bhsd, V_bhsd, O_bhsd, L_bhs)
         ctx.softmax_scale = softmax_scale
-        ctx.causal = causal
         ctx.HEAD_DIM = HEAD_DIM_K
 
         return O_bhsd
-
 
     @staticmethod
     def backward(ctx, dO_bhsd):
         Q_bhsd, K_bhsd, V_bhsd, O_bhsd, L_bhs = ctx.saved_tensors
 
         assert dO_bhsd.is_contiguous()
-        assert dO_bhsd.stride() == Q_bhsd.stride() == K_bhsd.stride() == V_bhsd.stride() == O_bhsd.stride()
+        assert (
+            dO_bhsd.stride()
+            == Q_bhsd.stride()
+            == K_bhsd.stride()
+            == V_bhsd.stride()
+            == O_bhsd.stride()
+        )
 
         dQ_bhsd = torch.empty_like(Q_bhsd)
         dK_bhsd = torch.empty_like(K_bhsd)
@@ -74,8 +82,12 @@ class FlashAttentionTriton(torch.autograd.Function):
 
         BATCH_SIZE, NUM_HEADS, SEQ_LEN, _ = Q_bhsd.shape
         HEAD_DIM = ctx.HEAD_DIM
-        
-        preprocess_grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+
+        preprocess_grid = lambda args: (
+            triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]),
+            BATCH_SIZE * NUM_HEADS,
+            1,
+        )
 
         D_bhs = torch.empty_like(L_bhs)
 
@@ -88,9 +100,11 @@ class FlashAttentionTriton(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM,
         )
 
-        grid = lambda args: (SEQ_LEN // args["BLOCK_SIZE_KV"], BATCH_SIZE * NUM_HEADS, 1)
-
-        stage = 3 if ctx.causal else 1
+        grid = lambda args: (
+            SEQ_LEN // args["BLOCK_SIZE_KV"],
+            BATCH_SIZE * NUM_HEADS,
+            1,
+        )
 
         # Fix KV and iterate through all the Q blocks
         _attn_bwd_dk_dv_kernel[grid](
@@ -119,7 +133,6 @@ class FlashAttentionTriton(torch.autograd.Function):
             NUM_HEADS=NUM_HEADS,
             SEQ_LEN=SEQ_LEN,
             HEAD_DIM=HEAD_DIM,
-            STAGE=stage,
         )
 
         grid = lambda args: (SEQ_LEN // args["BLOCK_SIZE_Q"], BATCH_SIZE * NUM_HEADS, 1)
@@ -151,7 +164,6 @@ class FlashAttentionTriton(torch.autograd.Function):
             NUM_HEADS=NUM_HEADS,
             SEQ_LEN=SEQ_LEN,
             HEAD_DIM=HEAD_DIM,
-            STAGE=stage,
         )
 
         return dQ_bhsd, dK_bhsd, dV_bhsd, None, None

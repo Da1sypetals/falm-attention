@@ -1,6 +1,6 @@
-import torch
 import triton
 import triton.language as tl
+
 
 @triton.autotune(
     [
@@ -31,8 +31,18 @@ def _attn_bwd_preprocess_kernel(
     offset_dim = tl.arange(0, HEAD_DIM)
 
     # Load a single block of BLOCK_SIZE_Q rows of O and dO
-    O_block = tl.load(O + index_batch_head * SEQ_LEN * HEAD_DIM + offset_q[:, None] * HEAD_DIM + offset_dim[None, :])
-    dO_block = tl.load(dO + index_batch_head * SEQ_LEN * HEAD_DIM + offset_q[:, None] * HEAD_DIM + offset_dim[None, :]).to(tl.float32)
+    O_block = tl.load(
+        O
+        + index_batch_head * SEQ_LEN * HEAD_DIM
+        + offset_q[:, None] * HEAD_DIM
+        + offset_dim[None, :]
+    )
+    dO_block = tl.load(
+        dO
+        + index_batch_head * SEQ_LEN * HEAD_DIM
+        + offset_q[:, None] * HEAD_DIM
+        + offset_dim[None, :]
+    ).to(tl.float32)
 
     # Compute D block
     # Elementwise multiply dO_block and O_block, sum over the head dimension, and store the result in D_block
@@ -42,6 +52,7 @@ def _attn_bwd_preprocess_kernel(
     D_block_ptrs = D + index_batch_head * SEQ_LEN + offset_q
     # Store D block
     tl.store(D_block_ptrs, D_block)
+
 
 @triton.autotune(
     [
@@ -59,19 +70,33 @@ def _attn_bwd_preprocess_kernel(
 )
 @triton.jit
 def _attn_bwd_dk_dv_kernel(
-    Q, K, V,
+    Q,
+    K,
+    V,
     softmax_scale,
     dO,
-    dQ, dK, dV,
+    dQ,
+    dK,
+    dV,
     L,
     D,
-    stride_Q_batch, stride_Q_head, stride_Q_seq, stride_Q_dim,
-    stride_K_batch, stride_K_head, stride_K_seq, stride_K_dim,
-    stride_V_batch, stride_V_head, stride_V_seq, stride_V_dim,
-    NUM_HEADS: tl.constexpr, SEQ_LEN: tl.constexpr, HEAD_DIM: tl.constexpr,
-    STAGE: tl.constexpr,
+    stride_Q_batch,
+    stride_Q_head,
+    stride_Q_seq,
+    stride_Q_dim,
+    stride_K_batch,
+    stride_K_head,
+    stride_K_seq,
+    stride_K_dim,
+    stride_V_batch,
+    stride_V_head,
+    stride_V_seq,
+    stride_V_dim,
+    NUM_HEADS: tl.constexpr,
+    SEQ_LEN: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    BLOCK_SIZE_Q: tl.constexpr
+    BLOCK_SIZE_Q: tl.constexpr,
 ):
     index_batch_head = tl.program_id(1)
     offset_batch_head = (index_batch_head * SEQ_LEN * HEAD_DIM).to(tl.int64)
@@ -135,18 +160,12 @@ def _attn_bwd_dk_dv_kernel(
         # Use logsumexp to get the softmax values
         P_T_block = tl.math.exp(QK_T_block - L_block[None, :])
 
-        if STAGE == 3:
-            # Autoregressive masking
-            # mask is True for all values that DO NOT NEED TO BE MASKED
-            mask_block = (offset_q[None, :] >= offset_kv[:, None])
-            P_T_block = tl.where(mask_block, P_T_block, 0.0)
-
         dO_block = tl.load(dO_ptrs)
         dV_block += tl.dot(P_T_block.to(tl.float16), dO_block)
 
         # Load Di which is elementwise product of O and dO
         Di = tl.load(D + offset_q)
-        
+
         # dP = dO x V^T, so dP^T = V x dO^T
         dP_T_block = tl.dot(V_block, tl.trans(dO_block)).to(tl.float32)
 
@@ -162,7 +181,7 @@ def _attn_bwd_dk_dv_kernel(
         curr_q += BLOCK_SIZE_Q
         Q_T_ptrs += BLOCK_SIZE_Q * HEAD_DIM
         dO_ptrs += BLOCK_SIZE_Q * HEAD_DIM
-        
+
     # Write dV
     dV_block_ptrs = dV + offset_kv[:, None] * HEAD_DIM + offset_dim[None, :]
     tl.store(dV_block_ptrs, dV_block)
@@ -170,6 +189,7 @@ def _attn_bwd_dk_dv_kernel(
     # Write dK
     dK_block_ptrs = dK + offset_kv[:, None] * HEAD_DIM + offset_dim[None, :]
     tl.store(dK_block_ptrs, dK_block)
+
 
 @triton.autotune(
     [
@@ -187,19 +207,33 @@ def _attn_bwd_dk_dv_kernel(
 )
 @triton.jit
 def _attn_bwd_dq_kernel(
-    Q, K, V,                    # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
-    softmax_scale,              # float
-    dO,                         # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
-    dQ, dK, dV,                 # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
-    L,                          # (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
-    D,                          # (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
-    stride_Q_batch, stride_Q_head, stride_Q_seq, stride_Q_dim,
-    stride_K_batch, stride_K_head, stride_K_seq, stride_K_dim,
-    stride_V_batch, stride_V_head, stride_V_seq, stride_V_dim,
-    NUM_HEADS: tl.constexpr, SEQ_LEN: tl.constexpr, HEAD_DIM: tl.constexpr,
-    STAGE: tl.constexpr,
+    Q,
+    K,
+    V,  # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
+    softmax_scale,  # float
+    dO,  # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
+    dQ,
+    dK,
+    dV,  # (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM)
+    L,  # (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
+    D,  # (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
+    stride_Q_batch,
+    stride_Q_head,
+    stride_Q_seq,
+    stride_Q_dim,
+    stride_K_batch,
+    stride_K_head,
+    stride_K_seq,
+    stride_K_dim,
+    stride_V_batch,
+    stride_V_head,
+    stride_V_seq,
+    stride_V_dim,
+    NUM_HEADS: tl.constexpr,
+    SEQ_LEN: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    BLOCK_SIZE_Q: tl.constexpr
+    BLOCK_SIZE_Q: tl.constexpr,
 ):
     index_batch_head = tl.program_id(1)
     offset_batch_head = (index_batch_head * SEQ_LEN * HEAD_DIM).to(tl.int64)
@@ -231,7 +265,7 @@ def _attn_bwd_dq_kernel(
     # Load Q block => this will stay in SRAM
     # Shape: (BLOCK_SIZE_Q, HEAD_DIM)
     Q_block = tl.load(Q + offset_q[:, None] * HEAD_DIM + offset_dim[None, :])
-    
+
     dQ_block = tl.zeros((BLOCK_SIZE_Q, HEAD_DIM), dtype=tl.float32)
     dO_block = tl.load(dO + offset_q[:, None] * HEAD_DIM + offset_dim[None, :])
 
@@ -259,14 +293,6 @@ def _attn_bwd_dq_kernel(
         # Use logsumexp to get the softmax values
         P_block = tl.math.exp(QK_block - L_block[:, None])
 
-        if STAGE == 3:
-            offset_kv = curr_kv + tl.arange(0, BLOCK_SIZE_KV)
-
-            # Autoregressive masking
-            # mask is True for all values that DO NOT NEED TO BE MASKED
-            mask_block = (offset_q[:, None] >= offset_kv[None, :])
-            P_block = tl.where(mask_block, P_block, 0.0)
-
         # Compute dP and dS
         dP_block = tl.dot(dO_block, V_T_block).to(tl.float32)
         dS_block = P_block * (dP_block - Di[:, None])
@@ -278,7 +304,7 @@ def _attn_bwd_dq_kernel(
         curr_kv += BLOCK_SIZE_KV
         K_T_ptrs += BLOCK_SIZE_KV * HEAD_DIM
         V_T_ptrs += BLOCK_SIZE_KV * HEAD_DIM
-          
+
     # Write dQ
     dQ_block_ptrs = dQ + offset_q[:, None] * HEAD_DIM + offset_dim[None, :]
     tl.store(dQ_block_ptrs, dQ_block)
