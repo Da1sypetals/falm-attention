@@ -2,6 +2,19 @@ import triton
 import triton.language as tl
 
 
+# @triton.autotune(
+#     [
+#         triton.Config(
+#             {"BLOCK_SIZE_Q": BLOCK_SIZE_Q},
+#             num_stages=num_stages,
+#             num_warps=num_warps,
+#         )
+#         for BLOCK_SIZE_Q in [32, 64, 128]
+#         for num_stages in ([3, 4, 7])
+#         for num_warps in [2, 4]
+#     ],
+#     key=["SEQ_LEN", "HEAD_DIM"],
+# )
 @triton.autotune(
     [
         triton.Config(
@@ -9,9 +22,9 @@ import triton.language as tl
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [32, 64, 128]
-        for num_stages in ([3, 4, 7])
-        for num_warps in [2, 4]
+        for BLOCK_SIZE_Q in [32]
+        for num_stages in ([4])
+        for num_warps in [2]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -54,6 +67,20 @@ def _attn_bwd_preprocess_kernel(
     tl.store(D_block_ptrs, D_block)
 
 
+# @triton.autotune(
+#     [
+#         triton.Config(
+#             {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+#             num_stages=num_stages,
+#             num_warps=num_warps,
+#         )
+#         for BLOCK_SIZE_Q in [32, 64, 128]
+#         for BLOCK_SIZE_KV in [32, 64, 128]
+#         for num_stages in ([3, 4, 7])
+#         for num_warps in [2, 4]
+#     ],
+#     key=["SEQ_LEN", "HEAD_DIM"],
+# )
 @triton.autotune(
     [
         triton.Config(
@@ -61,10 +88,10 @@ def _attn_bwd_preprocess_kernel(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [32, 64, 128]
-        for BLOCK_SIZE_KV in [32, 64, 128]
-        for num_stages in ([3, 4, 7])
-        for num_warps in [2, 4]
+        for BLOCK_SIZE_Q in [32]
+        for BLOCK_SIZE_KV in [32]
+        for num_stages in ([4])
+        for num_warps in [2]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -191,6 +218,20 @@ def _attn_bwd_dk_dv_kernel(
     tl.store(dK_block_ptrs, dK_block)
 
 
+# @triton.autotune(
+#     [
+#         triton.Config(
+#             {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+#             num_stages=num_stages,
+#             num_warps=num_warps,
+#         )
+#         for BLOCK_SIZE_Q in [32, 64, 128]
+#         for BLOCK_SIZE_KV in [32, 64, 128]
+#         for num_stages in ([3, 4, 7])
+#         for num_warps in [2, 4]
+#     ],
+#     key=["SEQ_LEN", "HEAD_DIM"],
+# )
 @triton.autotune(
     [
         triton.Config(
@@ -198,10 +239,10 @@ def _attn_bwd_dk_dv_kernel(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [32, 64, 128]
-        for BLOCK_SIZE_KV in [32, 64, 128]
-        for num_stages in ([3, 4, 7])
-        for num_warps in [2, 4]
+        for BLOCK_SIZE_Q in [32]
+        for BLOCK_SIZE_KV in [32]
+        for num_stages in ([4])
+        for num_warps in [2]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )

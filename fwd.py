@@ -41,12 +41,12 @@ def _attn_fwd_kernel_inner(
         start_kv = tl.multiple_of(start_kv, BLOCK_SIZE_KV)
 
         # load K, V
-        K_block = tl.load(K_block_ptr)
+        K_block = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
         QK_block = tl.dot(Q_block, K_block)
 
-        Mj_block = tl.load(Mj_block_ptr)
+        Mj_block = tl.load(Mj_block_ptr, boundary_check=(0, 1), padding_option="zero")
         mask_block = tl.dot(Mi_block, Mj_block)
-        mask_block = tl.where(mask_block > 0.0, 0.0, -float("inf"))
+        mask_block = tl.where(mask_block > 0.0, 0.0, -1e6)
 
         QK_block = QK_block * softmax_scale
 
@@ -66,7 +66,7 @@ def _attn_fwd_kernel_inner(
         # apply the correction factor to the previous l_i and add the new l_ij
         l_i = l_i * alpha + l_ij
 
-        V_block = tl.load(V_block_ptr)
+        V_block = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
         P_block = P_block.to(tl.float16)
 
         # Compute O wtih corrections applied - O_new = P x V + O_old * alpha
@@ -77,9 +77,26 @@ def _attn_fwd_kernel_inner(
 
         # Advance to next K, V blocks
         K_block_ptr = tl.advance(K_block_ptr, (0, BLOCK_SIZE_KV))
+        Mj_block_ptr = tl.advance(Mj_block_ptr, (0, BLOCK_SIZE_KV))
         V_block_ptr = tl.advance(V_block_ptr, (BLOCK_SIZE_KV, 0))
 
     return O_block, l_i, m_i
+
+
+# @triton.autotune(
+#     [
+#         triton.Config(
+#             {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+#             num_stages=num_stages,
+#             num_warps=num_warps,
+#         )
+#         for BLOCK_SIZE_Q in [64, 128]
+#         for BLOCK_SIZE_KV in [32, 64]
+#         for num_stages in ([3, 4, 7])
+#         for num_warps in [2, 4]
+#     ],
+#     key=["SEQ_LEN", "HEAD_DIM"],
+# )
 
 
 @triton.autotune(
@@ -89,10 +106,10 @@ def _attn_fwd_kernel_inner(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [64, 128]
-        for BLOCK_SIZE_KV in [32, 64]
-        for num_stages in ([3, 4, 7])
-        for num_warps in [2, 4]
+        for BLOCK_SIZE_Q in [32]
+        for BLOCK_SIZE_KV in [32]
+        for num_stages in ([4])
+        for num_warps in [2]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -227,8 +244,8 @@ def _attn_fwd_kernel(
     O_block = tl.zeros((BLOCK_SIZE_Q, HEAD_DIM), dtype=tl.float32)
 
     # load the block of Q (outer loop) => this will stay in SRAM
-    Q_block = tl.load(Q_block_ptr)
-    Mi_block = tl.load(Mi_block_ptr)
+    Q_block = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
+    Mi_block = tl.load(Mi_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
     # stage = 3 if causal else 1
     # this step runs for non-causal attention (for stage = 1) or for
@@ -266,6 +283,7 @@ def _attn_fwd_kernel(
     # => exp(x - m) / l
     L_i = m_i + tl.math.log(l_i)
     L_ptrs = L + index_batch_head * SEQ_LEN + offset_q
+    L_mask = offset_q < SEQ_LEN
 
-    tl.store(L_ptrs, L_i)
-    tl.store(O_block_ptr, O_block.to(O.type.element_ty))
+    tl.store(L_ptrs, L_i, mask=L_mask)
+    tl.store(O_block_ptr, O_block.to(O.type.element_ty), boundary_check=(0, 1))

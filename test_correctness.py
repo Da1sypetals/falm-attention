@@ -76,9 +76,9 @@ def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, MASK_DIM, dtype=torch.floa
     atol = 1e-2
 
     diff = ref_O - tri_out
-    diffmean = diff.abs().mean() / tri_out.abs().mean()
+    diffmean = diff.abs().mean() / ref_O.abs().mean()
 
-    print(f"=== Mean = {tri_out.abs().mean()}")
+    print(f"=== Mean = {ref_O.abs().mean()}")
     print(f"=== Mean diff = {diffmean.item()}")
     # assert torch.allclose(ref_O, tri_out, atol=atol, rtol=rtol)
     # assert torch.allclose(ref_dK, tri_dK, atol=atol, rtol=rtol)
@@ -105,6 +105,6 @@ def test_op(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, MASK_DIM, dtype=torch.floa
 
 
 if __name__ == "__main__":
-    seqlen = 256
-    test_op(BATCH_SIZE=1, NUM_HEADS=4, SEQ_LEN=seqlen, MASK_DIM=64, HEAD_DIM=64)
+    seqlen = 997
+    test_op(BATCH_SIZE=1, NUM_HEADS=4, SEQ_LEN=seqlen, MASK_DIM=128, HEAD_DIM=64)
     # print("PASSED")
